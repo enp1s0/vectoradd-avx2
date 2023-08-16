@@ -2,25 +2,38 @@
 #include <vector>
 #include <chrono>
 #include <immintrin.h>
+#include <omp.h>
 
 using data_t = double;
 constexpr std::size_t N = 1lu << 25;
 
 template <unsigned n>
 struct load_unroll {
-	load_unroll(const double* const ptr, __m256d* const y) {
+	inline load_unroll(const double* const ptr, __m256d* const y) {
 		load_unroll<n - 1>(ptr, y);
 		y[n - 1] = _mm256_load_pd(ptr + (n - 1) * 4);
 	}
 };
 template <>
 struct load_unroll<0> {
-	load_unroll(const double* const ptr, __m256d* const ymm) {}
+	inline load_unroll(const double* const, __m256d* const) {}
+};
+
+template <unsigned n>
+struct prefetch_unroll {
+	inline prefetch_unroll(const double* const ptr) {
+		prefetch_unroll<n - 1>{ptr};
+		__builtin_prefetch((const void*)(ptr + (n - 1) * 4), 0, 0);
+	}
+};
+template <>
+struct prefetch_unroll<0> {
+	inline prefetch_unroll(const double* const) {}
 };
 
 template <unsigned n>
 struct add_unroll {
-	add_unroll(double* const ptr, const __m256d* const y, const __m256d* const x) {
+	inline add_unroll(double* const ptr, const __m256d* const y, const __m256d* const x) {
 		add_unroll<n - 1>(ptr, y, x);
 		const auto z = _mm256_add_pd(x[n - 1], y[n - 1]);
 		_mm256_store_pd(ptr + (n - 1) * 4, z);
@@ -28,7 +41,7 @@ struct add_unroll {
 };
 template <>
 struct add_unroll<0> {
-	add_unroll(double* const ptr, const __m256d* const y, const __m256d* const x) {}
+	inline add_unroll(double* const ptr, const __m256d* const y, const __m256d* const x) {}
 };
 
 template <class T, unsigned unrolling_len>
@@ -56,10 +69,13 @@ void eval_core(
 	const T* const y_ptr,
 	const std::size_t len
 	) {
+	const auto test_count = 100;
 	const auto start_clock = std::chrono::system_clock::now();
-	vector_add<T, unrolling_len>(z_ptr, x_ptr, y_ptr, len);
+	for (unsigned c = 0; c < test_count; c++) {
+		vector_add<T, unrolling_len>(z_ptr, x_ptr, y_ptr, len);
+	}
 	const auto end_clock = std::chrono::system_clock::now();
-	const auto elapsed_time = std::chrono::duration_cast<std::chrono::nanoseconds>(end_clock - start_clock).count() * 1e-9;
+	const auto elapsed_time = std::chrono::duration_cast<std::chrono::nanoseconds>(end_clock - start_clock).count() * 1e-9 / test_count;
 
 	double max_relative_error = 0;
 #pragma omp parallel for reduction(max: max_relative_error)
@@ -69,7 +85,7 @@ void eval_core(
 		max_relative_error = std::max(max_relative_error, std::abs(diff) / correct);
 	}
 
-	std::printf("unrolling len = %4u, Throughput : %e [GFlop/s], %e [GiB/s] (error=%e, %s)\n",
+	std::printf("unrolling len = %4u, Throughput : %e [GFlop/s], %e [GB/s] (error=%e, %s)\n",
 							unrolling_len,
 							N / elapsed_time * 1e-9,
 							3 * sizeof(data_t) * N / elapsed_time * 1e-9,
